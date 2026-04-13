@@ -225,17 +225,15 @@ def _build_sprite_sheet_rgba(
     return canvas, sprite_meta
 
 
-def _rgba_canvas_to_outputs(canvas: Image.Image) -> tuple[Any, Any]:
+def _rgba_canvas_to_image(canvas: Image.Image) -> Any:
     if torch is None:  # pragma: no cover - ComfyUI runtime should provide torch
         raise RuntimeError("torch 不可用，无法处理 ComfyUI IMAGE 张量")
 
     rgba_array = np.asarray(canvas).astype(np.float32) / 255.0
-    rgb_tensor = torch.from_numpy(rgba_array[:, :, :3])[None, ...]
-    alpha_mask = torch.from_numpy(rgba_array[:, :, 3])
-    return rgb_tensor, alpha_mask
+    return torch.from_numpy(rgba_array)[None, ...]
 
 
-def _extract_single_image_rgb(image: Any) -> np.ndarray:
+def _extract_single_image_rgba(image: Any, mask: Any | None = None) -> np.ndarray:
     image_batch = _normalize_image_batch(image)
     if int(image_batch.shape[0]) != 1:
         raise ValueError(f"保存精灵图时 images 必须是单张图，当前 batch={int(image_batch.shape[0])}")
@@ -245,7 +243,16 @@ def _extract_single_image_rgb(image: Any) -> np.ndarray:
         raise ValueError(f"sprite image 必须是 HWC，当前 shape={image_array.shape}")
     if image_array.shape[2] == 1:
         image_array = np.repeat(image_array, 3, axis=2)
-    return image_array[:, :, :3]
+
+    if image_array.shape[2] >= 4:
+        rgba_array = image_array[:, :, :4]
+        if mask is not None:
+            alpha_array = _extract_single_mask(mask, rgba_array.shape[0], rgba_array.shape[1])
+            rgba_array[:, :, 3] = alpha_array
+        return rgba_array
+
+    alpha_array = _extract_single_mask(mask, image_array.shape[0], image_array.shape[1])
+    return np.dstack([image_array[:, :, :3], alpha_array])
 
 
 def _extract_single_mask(mask: Any | None, height: int, width: int) -> np.ndarray:
@@ -275,8 +282,8 @@ def _parse_sprite_metadata_json(raw: str) -> dict[str, Any]:
 class OCSpriteSheetBuilder:
     CATEGORY = "oc/action"
     FUNCTION = "build_sprite_sheet"
-    RETURN_TYPES = ("IMAGE", "MASK", "STRING")
-    RETURN_NAMES = ("sprite_image", "sprite_mask", "sprite_metadata_json")
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("sprite_image", "sprite_metadata_json")
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, Any]:
@@ -313,7 +320,7 @@ class OCSpriteSheetBuilder:
         metadata_key: str,
         frame_names_json: str,
         masks: Any | None = None,
-    ) -> tuple[Any, Any, str]:
+    ) -> tuple[Any, str]:
         canvas, sprite_meta = _build_sprite_sheet_rgba(
             images=images,
             masks=masks,
@@ -328,9 +335,9 @@ class OCSpriteSheetBuilder:
             metadata_key=metadata_key,
             frame_names_json=frame_names_json,
         )
-        sprite_image, sprite_mask = _rgba_canvas_to_outputs(canvas)
+        sprite_image = _rgba_canvas_to_image(canvas)
         sprite_meta_json = json.dumps(sprite_meta, ensure_ascii=False, indent=2)
-        return sprite_image, sprite_mask, sprite_meta_json
+        return sprite_image, sprite_meta_json
 
 
 class OCSpriteSheetSavePNG:
@@ -376,11 +383,20 @@ class OCSpriteSheetSavePNG:
         prompt: Any | None = None,
         extra_pnginfo: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        rgb_array = _extract_single_image_rgb(image)
-        alpha_array = _extract_single_mask(mask, rgb_array.shape[0], rgb_array.shape[1])
-        rgba_image = Image.fromarray(np.dstack([rgb_array, alpha_array]), mode="RGBA")
-
         sprite_meta = _parse_sprite_metadata_json(sprite_metadata_json)
+        image_batch = _normalize_image_batch(image)
+        image_channels = int(image_batch.shape[3]) if hasattr(image_batch, "shape") and len(image_batch.shape) == 4 else 0
+        image_has_alpha = image_channels >= 4
+
+        if mask is None and sprite_meta.get("background") == "transparent" and not image_has_alpha:
+            raise ValueError(
+                "当前精灵图元数据要求透明背景，但输入 image 不带 alpha，Save PNG 节点也没有接收到 mask。"
+                "请传入带 alpha 的 IMAGE，或额外连接 mask。"
+            )
+
+        rgba_array = _extract_single_image_rgba(image, mask)
+        rgba_image = Image.fromarray(rgba_array, mode="RGBA")
+
         metadata_key = metadata_key_override.strip() or str(sprite_meta.get("metadata_key", "sprite_sheet"))
 
         output_path, subfolder = _next_output_path(filename_prefix, self.output_dir)
