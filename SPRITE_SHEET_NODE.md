@@ -30,6 +30,7 @@
 ### 输出
 
 - `sprite_image`
+- `sprite_mask`
 - `sprite_metadata_json`
 
 ### 输入
@@ -72,9 +73,9 @@
 这一版已经改成纯图片处理节点了：
 
 - 输入：`IMAGE`
-- 输出：`IMAGE + STRING`
+- 输出：`IMAGE + MASK + STRING`
 
-其中 `sprite_image` 会直接携带 RGBA；如果上游透明存在，或你传入了 `masks`，alpha 会直接写进输出图片本身。
+所以你后面可以直接把 `sprite_image` 接到别的图片节点，不会被保存节点卡住。
 
 ## Save PNG 节点
 
@@ -89,7 +90,6 @@
 - `mask`
   - 可选
   - 对应精灵图的 alpha mask
-  - 仅在输入 `image` 本身不带 alpha 时作为补充使用
 - `sprite_metadata_json`
   - 来自 `Builder`
 - `filename_prefix`
@@ -188,6 +188,7 @@ ComfyUI 本身没有通用的 sprite sheet 标准字段。
 `Builder` 输出：
 
 - `sprite_image`
+- `sprite_mask`
 - `sprite_metadata_json`
 
 `Save PNG` 输出：
@@ -225,8 +226,6 @@ ComfyUI 本身没有通用的 sprite sheet 标准字段。
 
 - 如果 `cell_width / cell_height` 小于输入帧最大尺寸，节点会直接报错，不会偷偷裁图
 - 如果没有 `masks` 输入，且上游 `IMAGE` 也不带 alpha，就会输出/保存为不透明图
-- `Builder` 现在会直接输出带 alpha 的 `sprite_image`
-- `Save PNG` 会优先读取 `image` 自带 alpha；只有当输入图片不带 alpha 时，才需要额外传 `mask`
 - 角色动作帧通常建议：
   - `horizontal_align = center`
   - `vertical_align = bottom`
