@@ -356,7 +356,7 @@ class OCSpriteSheetSavePNG:
                 "metadata_key_override": ("STRING", {"default": ""}),
             },
             "optional": {
-                "masi": ("MASK",),
+                "mask": ("MASK",),
             },
             "hidden": {
                 "prompt": "PROMPT",
