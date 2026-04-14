@@ -68,6 +68,23 @@ def _normalize_mask_batch(masks: Any) -> Any:
     return masks
 
 
+def _merge_alpha_channel(image_array: np.ndarray, mask: Any | None) -> np.ndarray:
+    height, width = image_array.shape[0], image_array.shape[1]
+
+    if image_array.shape[2] >= 4:
+        alpha = image_array[:, :, 3].astype(np.float32) / 255.0
+    else:
+        alpha = np.ones((height, width), dtype=np.float32)
+
+    if mask is not None:
+        # ComfyUI MASK commonly represents the masked-out area as 1.0, so for
+        # PNG alpha we invert it to "1.0 means opaque / 0.0 means transparent".
+        mask_alpha = 1.0 - np.clip(mask.cpu().numpy(), 0.0, 1.0).astype(np.float32)
+        alpha = alpha * mask_alpha
+
+    return np.clip(alpha * 255.0, 0, 255).astype(np.uint8)
+
+
 def _tensor_image_to_rgba(image: Any, mask: Any | None) -> Image.Image:
     image_array = np.clip(255.0 * image.cpu().numpy(), 0, 255).astype(np.uint8)
 
@@ -77,13 +94,8 @@ def _tensor_image_to_rgba(image: Any, mask: Any | None) -> Image.Image:
     if image_array.shape[2] == 1:
         image_array = np.repeat(image_array, 3, axis=2)
 
-    if image_array.shape[2] >= 4:
-        rgba_array = image_array[:, :, :4]
-    else:
-        alpha = np.full((image_array.shape[0], image_array.shape[1]), 255, dtype=np.uint8)
-        if mask is not None:
-            alpha = np.clip(255.0 * mask.cpu().numpy(), 0, 255).astype(np.uint8)
-        rgba_array = np.dstack([image_array[:, :, :3], alpha])
+    alpha = _merge_alpha_channel(image_array, mask)
+    rgba_array = np.dstack([image_array[:, :, :3], alpha])
 
     return Image.fromarray(rgba_array, mode="RGBA")
 
@@ -184,7 +196,12 @@ def _build_sprite_sheet_rgba(
         paste_x = cell_x + offset_x
         paste_y = cell_y + offset_y
 
-        canvas.alpha_composite(frame_image, (paste_x, paste_y))
+        if background == "transparent":
+            # Transparent sheet keeps the source RGBA pixels as-is, avoiding
+            # extra compositing on semi-transparent edges.
+            canvas.paste(frame_image, (paste_x, paste_y))
+        else:
+            canvas.alpha_composite(frame_image, (paste_x, paste_y))
         frames_meta.append(
             {
                 "index": index,
@@ -230,12 +247,12 @@ def _rgba_canvas_to_outputs(canvas: Image.Image) -> tuple[Any, Any]:
         raise RuntimeError("torch 不可用，无法处理 ComfyUI IMAGE 张量")
 
     rgba_array = np.asarray(canvas).astype(np.float32) / 255.0
-    rgb_tensor = torch.from_numpy(rgba_array[:, :, :3])[None, ...]
+    rgba_tensor = torch.from_numpy(rgba_array[:, :, :4])[None, ...]
     alpha_mask = torch.from_numpy(rgba_array[:, :, 3])
-    return rgb_tensor, alpha_mask
+    return rgba_tensor, alpha_mask
 
 
-def _extract_single_image_rgb(image: Any) -> np.ndarray:
+def _extract_single_image_rgba(image: Any) -> np.ndarray:
     image_batch = _normalize_image_batch(image)
     if int(image_batch.shape[0]) != 1:
         raise ValueError(f"保存精灵图时 images 必须是单张图，当前 batch={int(image_batch.shape[0])}")
@@ -245,12 +262,13 @@ def _extract_single_image_rgb(image: Any) -> np.ndarray:
         raise ValueError(f"sprite image 必须是 HWC，当前 shape={image_array.shape}")
     if image_array.shape[2] == 1:
         image_array = np.repeat(image_array, 3, axis=2)
-    return image_array[:, :, :3]
+    alpha = _merge_alpha_channel(image_array, None)
+    return np.dstack([image_array[:, :, :3], alpha])
 
 
-def _extract_single_mask(mask: Any | None, height: int, width: int) -> np.ndarray:
+def _extract_single_mask(mask: Any | None, height: int, width: int) -> np.ndarray | None:
     if mask is None:
-        return np.full((height, width), 255, dtype=np.uint8)
+        return None
 
     mask_batch = _normalize_mask_batch(mask)
     if int(mask_batch.shape[0]) != 1:
@@ -376,9 +394,17 @@ class OCSpriteSheetSavePNG:
         prompt: Any | None = None,
         extra_pnginfo: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        rgb_array = _extract_single_image_rgb(image)
-        alpha_array = _extract_single_mask(mask, rgb_array.shape[0], rgb_array.shape[1])
-        rgba_image = Image.fromarray(np.dstack([rgb_array, alpha_array]), mode="RGBA")
+        rgba_array = _extract_single_image_rgba(image)
+        alpha_override = _extract_single_mask(mask, rgba_array.shape[0], rgba_array.shape[1])
+        if alpha_override is not None:
+            rgba_array[:, :, 3] = np.clip(
+                (rgba_array[:, :, 3].astype(np.float32) / 255.0)
+                * (1.0 - (alpha_override.astype(np.float32) / 255.0))
+                * 255.0,
+                0,
+                255,
+            ).astype(np.uint8)
+        rgba_image = Image.fromarray(rgba_array, mode="RGBA")
 
         sprite_meta = _parse_sprite_metadata_json(sprite_metadata_json)
         metadata_key = metadata_key_override.strip() or str(sprite_meta.get("metadata_key", "sprite_sheet"))
